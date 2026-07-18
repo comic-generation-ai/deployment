@@ -204,10 +204,15 @@ services:
     build:
       context: ../image-ai
       dockerfile: Dockerfile
+    # --pool=solo bắt buộc với GPU: CUDA không sống sót qua fork() của pool
+    # "prefork" mặc định của Celery — thiếu cờ này crash ngay lúc warmup với
+    # "Cannot re-initialize CUDA in forked subprocess" (đã xác nhận qua log
+    # thật). Toàn bộ flow venv trước giờ luôn chạy đúng cờ này, compose thiếu.
     command: >
       celery -A worker.celery_app worker
       --loglevel=info
       --concurrency=1
+      --pool=solo
     env_file:
       - ../image-ai/.env
     environment:
