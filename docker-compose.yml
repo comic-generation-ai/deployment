@@ -211,6 +211,11 @@ services:
     env_file:
       - ../image-ai/.env
     environment:
+      # command: ở trên gọi thẳng "celery -A worker..." thay vì CMD mặc định
+      # của Dockerfile ("python -m src.server") — worker.celery_app thật ra
+      # nằm ở /app/src/worker/, cần PYTHONPATH trỏ vào src/ mới import được
+      # (đúng biến venv runbook luôn set tay: export PYTHONPATH=src).
+      PYTHONPATH: /app/src
       IMAGE_AI_REDIS_URL: redis://redis:6379/3
       IMAGE_AI_CELERY_BROKER_URL: redis://redis:6379/4
       IMAGE_AI_CELERY_RESULT_BACKEND: redis://redis:6379/5
