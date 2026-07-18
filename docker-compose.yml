@@ -29,7 +29,6 @@ volumes:
   postgres_data:
   redis_data:
   minio_data:
-  image_ai_model_cache:
 
 services:
   # ─── Infrastructure (shared) ───────────────────────────────────────────────
@@ -188,7 +187,11 @@ services:
       IMAGE_AI_MINIO_USE_SSL: "false"
       IMAGE_AI_MODEL_CACHE_DIR: /cache
     volumes:
-      - image_ai_model_cache:/cache
+      # Bind-mount thẳng .cache của repo host thay vì named volume trống — máy
+      # nào đã dev bằng venv trước đó (vd Mac, xem MODEL_CACHE_DIR mặc định =
+      # <repo>/.cache) thì tái dùng luôn model đã tải, khỏi tải lại vài GB.
+      # Máy GPU cloud mới clone thì thư mục rỗng, Docker tự tạo, không khác gì.
+      - ../image-ai/.cache:/cache
     depends_on:
       redis:
         condition: service_healthy
@@ -219,7 +222,11 @@ services:
       IMAGE_AI_MODEL_CACHE_DIR: /cache
 
     volumes:
-      - image_ai_model_cache:/cache
+      # Bind-mount thẳng .cache của repo host thay vì named volume trống — máy
+      # nào đã dev bằng venv trước đó (vd Mac, xem MODEL_CACHE_DIR mặc định =
+      # <repo>/.cache) thì tái dùng luôn model đã tải, khỏi tải lại vài GB.
+      # Máy GPU cloud mới clone thì thư mục rỗng, Docker tự tạo, không khác gì.
+      - ../image-ai/.cache:/cache
     depends_on:
       redis:
         condition: service_healthy
