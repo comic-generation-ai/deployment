@@ -110,7 +110,7 @@ services:
       DB_USERNAME: ${POSTGRES_USER:-comic}
       DB_PASSWORD: ${POSTGRES_PASSWORD:-comic}
       DB_DATABASE: ${POSTGRES_DB:-comic}
-      ORCHESTRATOR_URL: orchestrator-ai:50052
+      ORCHESTRATOR_URL: orchestrator-ai:50054
       MINIO_ENDPOINT: minio
       MINIO_PORT: "9000"
       MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
