@@ -1,0 +1,239 @@
+# ComicSystem — Full stack (multi-repo)
+#
+# Repo `deployment` là lớp glue: compose toàn bộ service từ các repo sibling.
+# Yêu cầu clone cùng cấp thư mục:
+#
+#   ComicSystem/
+#   ├── deployment/       ← chạy docker compose tại đây
+#   ├── fe-comic/
+#   ├── be-comic/
+#   ├── orchestrator-ai/
+#   ├── story-ai/
+#   └── image-ai/
+#
+# Chạy:
+#   docker compose up --build
+#
+# Config model/API key lấy từ .env GỐC của từng repo (env_file bên dưới) — nhớ
+# kiểm tra image-ai/.env đang bật ĐÚNG khối profile muốn deploy (vd khối GPU
+# non-turbo cho production, không phải khối dev Mac LCM) trước khi build.
+# Dev từng service: dùng docker-compose riêng trong repo đó (vd. fe-comic hot-reload).
+
+name: comic-system
+
+networks:
+  comic-internal:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  image_ai_model_cache:
+
+services:
+  # ─── Infrastructure (shared) ───────────────────────────────────────────────
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-comic}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-comic}
+      POSTGRES_DB: ${POSTGRES_DB:-comic}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - comic-internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-comic}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    networks:
+      - comic-internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    volumes:
+      - minio_data:/data
+    networks:
+      - comic-internal
+    # Chỉ expose console khi dev; production nên tắt port public
+    ports:
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+
+  # ─── Frontend (public) ─────────────────────────────────────────────────────
+
+  fe-comic:
+    build:
+      context: ../fe-comic
+      dockerfile: Dockerfile
+      target: production
+    ports:
+      - "${FE_PORT:-4200}:80"
+    depends_on:
+      be-comic:
+        condition: service_started
+    networks:
+      - comic-internal
+
+  # ─── Backend API (public) ──────────────────────────────────────────────────
+
+  be-comic:
+    build:
+      context: ../be-comic
+      dockerfile: Dockerfile
+    env_file:
+      - ../be-comic/.env
+    ports:
+      - "${BE_PORT:-3000}:3000"
+    environment:
+      # Override để trỏ vào service name nội bộ Docker thay vì localhost/127.0.0.1
+      # trong .env gốc (dùng cho chạy tay ngoài Docker) — các biến khác (JWT_SECRET,
+      # CORS_ORIGINS, EXPIRESIN_*...) giữ nguyên từ env_file ở trên.
+      PORT: "3000"
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USERNAME: ${POSTGRES_USER:-comic}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-comic}
+      DB_DATABASE: ${POSTGRES_DB:-comic}
+      ORCHESTRATOR_URL: orchestrator-ai:50052
+      MINIO_ENDPOINT: minio
+      MINIO_PORT: "9000"
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      orchestrator-ai:
+        condition: service_started
+    networks:
+      - comic-internal
+    # be-comic không dùng Redis (không có usage nào trong src/) — cố tình
+    # không khai REDIS_URL/depends_on redis ở đây để tránh gây hiểu lầm.
+
+  # ─── AI services (internal — không expose ra internet) ─────────────────────
+
+  orchestrator-ai:
+    build:
+      context: ../orchestrator-ai
+      dockerfile: Dockerfile
+    env_file:
+      - ../orchestrator-ai/.env
+    environment:
+      # settings.py dùng env_prefix="ORCHESTRATOR_" — PHẢI có tiền tố này,
+      # biến trần (vd REDIS_URL suông) bị pydantic-settings âm thầm bỏ qua.
+      ORCHESTRATOR_REDIS_URL: redis://redis:6379/1
+      ORCHESTRATOR_IMAGE_AI_GRPC_TARGET: image-ai-grpc:50051
+      ORCHESTRATOR_STORY_AI_API_URL: http://story-ai:50052
+    depends_on:
+      story-ai:
+        condition: service_started
+      image-ai-grpc:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    networks:
+      - comic-internal
+    # Không publish port ra host — chỉ be-comic gọi qua network nội bộ
+
+  story-ai:
+    build:
+      context: ../story-ai
+      dockerfile: Dockerfile
+    env_file:
+      # API_KEY (OpenRouter/DashScope) đọc thẳng từ đây — THIẾU biến này
+      # story-ai tự fallback sang "mock mode" (in cảnh báo, không lỗi rõ ràng),
+      # nên bắt buộc phải có API_KEY thật trong story-ai/.env trước khi deploy.
+      - ../story-ai/.env
+    environment:
+      PORT: "50052"
+    networks:
+      - comic-internal
+    # story-ai không dùng Redis (không có usage nào trong src/), giữ stateless.
+
+  image-ai-grpc:
+    build:
+      context: ../image-ai
+      dockerfile: Dockerfile
+    command: ["python", "-m", "src.server"]
+    env_file:
+      # MODEL_ID, GUIDANCE_SCALE, STEPS, IP_ADAPTER_SCALE, HF_TOKEN... lấy từ
+      # khối profile đang bật trong image-ai/.env — kiểm tra lại khối [D] (GPU
+      # non-turbo) đang active trước khi build cho production, không phải [A].
+      - ../image-ai/.env
+    environment:
+      # settings.py dùng env_prefix="IMAGE_AI_" — PHẢI có tiền tố này.
+      IMAGE_AI_REDIS_URL: redis://redis:6379/3
+      IMAGE_AI_CELERY_BROKER_URL: redis://redis:6379/4
+      IMAGE_AI_CELERY_RESULT_BACKEND: redis://redis:6379/5
+      IMAGE_AI_MINIO_ENDPOINT: minio
+      IMAGE_AI_MINIO_PORT: "9000"
+      IMAGE_AI_MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
+      IMAGE_AI_MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      IMAGE_AI_MINIO_USE_SSL: "false"
+      IMAGE_AI_MODEL_CACHE_DIR: /cache
+    volumes:
+      - image_ai_model_cache:/cache
+    depends_on:
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    networks:
+      - comic-internal
+
+  image-ai-worker:
+    build:
+      context: ../image-ai
+      dockerfile: Dockerfile
+    command: >
+      celery -A worker.celery_app worker
+      --loglevel=info
+      --concurrency=1
+    env_file:
+      - ../image-ai/.env
+    environment:
+      IMAGE_AI_REDIS_URL: redis://redis:6379/3
+      IMAGE_AI_CELERY_BROKER_URL: redis://redis:6379/4
+      IMAGE_AI_CELERY_RESULT_BACKEND: redis://redis:6379/5
+      IMAGE_AI_MINIO_ENDPOINT: minio
+      IMAGE_AI_MINIO_PORT: "9000"
+      IMAGE_AI_MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
+      IMAGE_AI_MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      IMAGE_AI_MINIO_USE_SSL: "false"
+      IMAGE_AI_MODEL_CACHE_DIR: /cache
+
+    volumes:
+      - image_ai_model_cache:/cache
+    depends_on:
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+      image-ai-grpc:
+        condition: service_started
+    networks:
+      - comic-internal
+    # GPU (bật khi deploy lên máy có NVIDIA):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
